@@ -5,6 +5,9 @@
 #include <ArduinoMqttClient.h>
 #include <ArduinoJson.h>
 
+#include <SoftwareSerial.h>
+#include <MHZ.h>
+
 #include "Adafruit_CCS811.h"
 #include "Adafruit_HTU21DF.h"
 
@@ -15,6 +18,16 @@
 
 Adafruit_HTU21DF htu = Adafruit_HTU21DF();
 Adafruit_CCS811 ccs;
+
+// pin for pwm reading
+//#define CO2_IN 13 //D7
+// pin for uart reading
+#define MH_Z19_RX 14  // D
+#define MH_Z19_TX 12  // D
+
+//MHZ mz19co2(MH_Z19_RX, MH_Z19_TX, CO2_IN, MHZ19B);
+MHZ mz19co2(MH_Z19_RX, MH_Z19_TX, MHZ19B);
+
 
 ESP8266WebServer Server;          // Replace with WebServer for ESP32
 AutoConnect      Portal(Server);
@@ -47,8 +60,10 @@ float humidity;
 float temperature;
 float co2;
 float tvoc;
+int co2_mhz;
 
 void setup() {
+  //pinMode(CO2_IN, INPUT);
   delay(1000);
   Serial.begin(115200);
   Serial.println();
@@ -103,6 +118,9 @@ void setup() {
 
   // Wait for the sensor to be ready
   while(!ccs.available());
+
+  //mz19co2.setDebug(true);
+  mz19co2.setAutoCalibrate(true);
 }
 
 
@@ -175,6 +193,29 @@ void sendMQTTCo2DiscoveryMsg() {
   //mqttClient.publish(discoveryTopic.c_str(), buffer, n);
 }
 
+void sendMQTTCo2MHZDiscoveryMsg() {
+  String unique_id_c02 = String(unique_id) + "_co2mhz";
+  String discoveryTopic = "homeassistant/sensor/" + unique_id_c02 + "/co2/config";
+
+  DynamicJsonDocument doc(1024);
+  char buffer[256];
+
+  doc["name"] = sensorName + " CO2 MHZ";
+  doc["stat_t"]   = stateTopic;
+  doc["unit_of_measurement"] = "ppm";
+  doc["frc_upd"] = true;
+  doc["ic"] = "mdi:molecule-co2";
+  doc["uniq_id"] = unique_id_c02;
+  doc["val_tpl"] = "{{ value_json.co2_mhz|default(0)|int }}";
+
+  size_t n = serializeJson(doc, buffer);
+
+  mqttClient.beginMessage(discoveryTopic.c_str());
+  mqttClient.print(buffer);
+  mqttClient.endMessage();
+  //mqttClient.publish(discoveryTopic.c_str(), buffer, n);
+}
+
 void sendMQTTTvocDiscoveryMsg() {
   String unique_id_tvoc = String(unique_id) + "_tvoc";
   String discoveryTopic = "homeassistant/sensor/" + unique_id_tvoc + "/tvoc/config";
@@ -204,9 +245,38 @@ void loop() {
     if (mqttClient.connected()) {
   
       if (millis() - lastPub > updateInterval) {
+
+        if (mz19co2.isPreHeating()) {
+          Serial.print("MZ19B Preheating ");
+        }
+  
+        int ppm_uart = mz19co2.readCO2UART();
+        if (ppm_uart > 0) {
+          Serial.print("MZ19B: PPMuart: ");
+          Serial.print(ppm_uart);
+          co2_mhz = ppm_uart;
+        } else {
+          Serial.print("MZ19B: ");
+          Serial.println(ppm_uart);
+        }
+      
+//        int ppm_pwm = mz19co2.readCO2PWM();
+//        Serial.print(", PPMpwm: ");
+//        Serial.print(ppm_pwm);
+      
+        int temp_mz = mz19co2.getLastTemperature();
+        if (temp_mz > 0) {
+          Serial.print(", Temperature: ");
+          Serial.println(temp_mz);
+        } else {
+          Serial.print("MZ19B: ");
+          Serial.println(temp_mz);
+        }
+
         sendMQTTTemperatureDiscoveryMsg();
         sendMQTTHumidityDiscoveryMsg();
         sendMQTTCo2DiscoveryMsg();
+        sendMQTTCo2MHZDiscoveryMsg();
         sendMQTTTvocDiscoveryMsg();
 
         temperature = htu.readTemperature();
@@ -239,6 +309,8 @@ void loop() {
         doc["temperature"] = temperature;
         doc["co2"] = co2;
         doc["tvoc"] = tvoc;
+        doc["co2_mhz"] = co2_mhz;
+        
     
         size_t n = serializeJson(doc, buffer);
         
